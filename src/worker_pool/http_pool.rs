@@ -1,8 +1,7 @@
+use crate::worker_pool::cache;
 use anyhow::Result;
 use async_channel;
-use chrono::{DateTime, Local, Utc};
 use reqwest::{self, StatusCode};
-use std::collections::HashMap;
 use std::error::Error;
 use std::fmt;
 use std::sync::Arc;
@@ -42,52 +41,23 @@ pub struct HttpPoolResponse {
     status: StatusCode,
     file: String,
 }
-
-/*
- * HttpPoolCommand
- * Broadcasted to all workers to request some action
- */
+/* HttpPoolCommand
+* Broadcasted to all workers to request some action
+*/
 #[derive(Clone)]
 pub enum HttpPoolCommand {
     Shutdown,
 }
-
-#[derive(Debug)]
-struct CacheEntry {
-    present: bool,                  // present bit
-    path: String,                   // path to local file
-    created: chrono::DateTime<Utc>, // created timestamp
-    ref_count: i32,                 // usage counter
-}
-
-// trait HttpPoolCache {}
-
-pub struct LocalCache {
-    storage: String,
-    info: RwLock<HashMap<String, CacheEntry>>,
-}
-
-impl LocalCache {
-    fn new() -> Self {
-        LocalCache {
-            storage: "".to_owned(),
-            info: RwLock::new(HashMap::<String, CacheEntry>::new()),
-        }
-    }
-}
-
-// impl HttpPoolCache for LocalCache {}
-
 pub struct HttpPool {
     size: i32,
     timeout: i32,
-    cache: LocalCache,
+    cache: Option<Box<dyn cache::HttpPoolCache + Sync + Send>>,
 
     // channels to distribute work and shutdown graceful
     task_tx: async_channel::Sender<HttpPoolRequest>,
     task_rx: async_channel::Receiver<HttpPoolRequest>,
     command_tx: broadcast::Sender<HttpPoolCommand>,
-    _command_rx: broadcast::Receiver<HttpPoolCommand>,
+    command_rx: broadcast::Receiver<HttpPoolCommand>,
     shutdown_tx: mpsc::Sender<()>,
     shutdown_rx: mpsc::Receiver<()>,
 }
@@ -100,14 +70,14 @@ impl HttpPool {
     pub fn start(&self) -> Result<(), Box<dyn Error>> {
         for i in 0..self.size {
             let task_rx = self.task_rx.clone();
-            let mut _command_rx = self.command_tx.subscribe();
+            let mut command_rx = self.command_tx.subscribe();
             let shutdown_tx = self.shutdown_tx.clone();
 
             tokio::spawn(async move {
                 let _shutdown_sender = shutdown_tx;
                 loop {
                     tokio::select! {
-                        cmd = _command_rx.recv() => {
+                        cmd = command_rx.recv() => {
                             match cmd {
                                 _shutdown => {
                                     println!("HttpPoolWorker[{i}]: Received shutdown signal");
@@ -158,22 +128,32 @@ impl HttpPool {
     }
 
     pub async fn get(&self, url: String, timeout: u64) -> Result<HttpPoolResponse> {
-        // check the cache
-        let key = "someThing";
-        if let Some(value) = self.cache.info.read().await.get(key) {
-            println!("Found value in cache, return straight away");
-            println!("{:?}", value);
+        // check cache
+        let key = "someKey".to_owned();
+        if let Some(cache) = &self.cache {
+            if cache.entry_exists(&key, None).await {
+                let stream = cache.get_stream(&key).await;
+                println!("Found key in local cache, return immediately {:?}", stream);
+            }
         }
-        println!("No cache hit, load from backend");
-        self.cache.info.write().await.insert(
-            key.to_owned(),
-            CacheEntry {
-                present: true,
-                path: "".to_owned(),
-                created: chrono::Utc::now(),
-                ref_count: 0,
-            },
-        );
+        println!("Key not found, fetch from backend");
+
+        // check the cache
+        // let key = "someThing";
+        // if let Some(value) = self.cache.info.read().await.get(key) {
+        //     println!("Found value in cache, return straight away");
+        //     println!("{:?}", value);
+        // }
+        // println!("No cache hit, load from backend");
+        // self.cache.info.write().await.insert(
+        //     key.to_owned(),
+        //     CacheEntry {
+        //         present: true,
+        //         path: "".to_owned(),
+        //         created: chrono::Utc::now(),
+        //         ref_count: 0,
+        //     },
+        // );
 
         let (os_sender, os_receiver) = oneshot::channel::<HttpPoolResult>();
 
@@ -251,7 +231,7 @@ impl HttpPool {
 pub struct HttpPoolBuilder {
     size: i32,
     timeout: i32,
-    cache: LocalCache,
+    cache: Option<Box<dyn cache::HttpPoolCache + Sync + Send>>,
 }
 
 /*
@@ -262,7 +242,7 @@ impl HttpPoolBuilder {
         HttpPoolBuilder {
             size: 10,
             timeout: 60,
-            cache: LocalCache::new(),
+            cache: None,
         }
     }
 
@@ -276,8 +256,8 @@ impl HttpPoolBuilder {
         self
     }
 
-    pub fn cache(mut self, cache: LocalCache) -> HttpPoolBuilder {
-        self.cache = cache;
+    pub fn cache(mut self, cache: Box<dyn cache::HttpPoolCache + Sync + Send>) -> HttpPoolBuilder {
+        self.cache = Some(cache);
         self
     }
 
@@ -294,7 +274,7 @@ impl HttpPoolBuilder {
             task_tx: task_tx,
             task_rx: task_rx,
             command_tx: command_tx,
-            _command_rx: command_rx,
+            command_rx: command_rx,
             shutdown_tx: shutdown_tx,
             shutdown_rx: shutdown_rx,
         }

@@ -30,6 +30,7 @@ async fn main() -> anyhow::Result<()> {
     let http_pool = worker_pool::http_pool::HttpPool::builder()
         .size(20)
         .timeout(1200)
+        .use_local_cache()
         .build();
     http_pool.start().expect("Failed to start http pool");
 
