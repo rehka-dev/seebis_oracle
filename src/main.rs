@@ -3,6 +3,7 @@ mod worker_pool;
 use std::sync::Arc;
 
 use actix_web::{get, http, web, App, HttpServer, Responder};
+use anyhow::Result;
 use worker_pool::http_pool::HttpPool;
 
 struct AppState {
@@ -25,7 +26,7 @@ async fn shutdown<'a>(data: web::Data<AppState>) -> String {
 }
 
 #[tokio::main]
-async fn main() -> std::io::Result<()> {
+async fn main() -> anyhow::Result<()> {
     let http_pool = worker_pool::http_pool::HttpPool::builder()
         .size(20)
         .timeout(1200)
@@ -34,7 +35,6 @@ async fn main() -> std::io::Result<()> {
 
     let http_pool_arc = Arc::new(http_pool);
 
-    let a = String::from("Test");
     // let sql_pool
 
     let app_data = web::Data::new(AppState {

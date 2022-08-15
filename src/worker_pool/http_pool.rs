@@ -1,78 +1,91 @@
+use anyhow::Result;
 use async_channel;
+use chrono::{DateTime, Local, Utc};
 use reqwest::{self, StatusCode};
+use std::collections::HashMap;
 use std::error::Error;
-use tokio::sync::{broadcast, mpsc, oneshot};
+use std::fmt;
+use std::sync::Arc;
+use tokio::sync::{broadcast, mpsc, oneshot, Mutex, RwLock};
 use tokio::time;
 
-pub type HttpPoolSender = async_channel::Sender<HttpRequest>;
-pub type HttpPoolReceiver = async_channel::Receiver<HttpRequest>;
-pub type HttpPoolResponse = Result<HttpResponse, Box<dyn Error>>;
+/*
+ * HttpPoolResult
+ * Internal struct holding the information about the
+ * request result
+ */
+#[derive(Debug)]
+struct HttpPoolResult {}
 
-type HPResult<T> = std::result::Result<T, Box<dyn Error>>;
+impl fmt::Display for HttpPoolResult {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "HttpPoolResult")
+    }
+}
+/*
+ * HttpPoolRequest
+ * Requested by the clients and hand over to the pool to
+ * load and store the payload properly
+ */
+pub struct HttpPoolRequest {
+    url: String,                             // attachment url to download
+    path: String,                            // path to store payload in
+    result: oneshot::Sender<HttpPoolResult>, // channel to receive status
+}
 
-pub struct HttpResponse {
+/*
+ * HttpPoolResponse
+ * Received by the client requesting work
+*/
+pub struct HttpPoolResponse {
     url: String,
     status: StatusCode,
     file: String,
 }
 
-pub struct HttpRequest {
-    url: String,
-    // result: Sender<HttpPoolResponse>,
-    result: oneshot::Sender<String>,
-}
-
+/*
+ * HttpPoolCommand
+ * Broadcasted to all workers to request some action
+ */
 #[derive(Clone)]
 pub enum HttpPoolCommand {
     Shutdown,
 }
 
-pub struct HttpPoolBuilder {
-    size: i32,
-    timeout: i32,
+#[derive(Debug)]
+struct CacheEntry {
+    present: bool,                  // present bit
+    path: String,                   // path to local file
+    created: chrono::DateTime<Utc>, // created timestamp
+    ref_count: i32,                 // usage counter
 }
 
-impl HttpPoolBuilder {
-    pub fn new() -> HttpPoolBuilder {
-        HttpPoolBuilder {
-            size: 10,
-            timeout: 60,
-        }
-    }
+// trait HttpPoolCache {}
 
-    pub fn size(mut self, size: i32) -> HttpPoolBuilder {
-        self.size = size;
-        self
-    }
+pub struct LocalCache {
+    storage: String,
+    info: RwLock<HashMap<String, CacheEntry>>,
+}
 
-    pub fn timeout(mut self, timeout: i32) -> HttpPoolBuilder {
-        self.timeout = timeout;
-        self
-    }
-
-    pub fn build(self) -> HttpPool {
-        let (task_tx, task_rx) = async_channel::bounded::<HttpRequest>(self.size as usize);
-        let (command_tx, command_rx) = broadcast::channel::<HttpPoolCommand>(self.size as usize);
-        let (shutdown_tx, shutdown_rx) = mpsc::channel(1);
-
-        HttpPool {
-            size: self.size,
-            timeout: self.timeout,
-            task_tx: task_tx,
-            task_rx: task_rx,
-            command_tx: command_tx,
-            _command_rx: command_rx,
-            shutdown_tx: shutdown_tx,
-            shutdown_rx: shutdown_rx,
+impl LocalCache {
+    fn new() -> Self {
+        LocalCache {
+            storage: "".to_owned(),
+            info: RwLock::new(HashMap::<String, CacheEntry>::new()),
         }
     }
 }
+
+// impl HttpPoolCache for LocalCache {}
 
 pub struct HttpPool {
     size: i32,
     timeout: i32,
-    task_tx: HttpPoolSender,
-    task_rx: HttpPoolReceiver,
+    cache: LocalCache,
+
+    // channels to distribute work and shutdown graceful
+    task_tx: async_channel::Sender<HttpPoolRequest>,
+    task_rx: async_channel::Receiver<HttpPoolRequest>,
     command_tx: broadcast::Sender<HttpPoolCommand>,
     _command_rx: broadcast::Receiver<HttpPoolCommand>,
     shutdown_tx: mpsc::Sender<()>,
@@ -90,8 +103,6 @@ impl HttpPool {
             let mut _command_rx = self.command_tx.subscribe();
             let shutdown_tx = self.shutdown_tx.clone();
 
-            // let (send, mut recv) = mpsc::channel::<String>(1);
-            // let shutdown_receiver = self.shutdown_rx.cl
             tokio::spawn(async move {
                 let _shutdown_sender = shutdown_tx;
                 loop {
@@ -126,7 +137,7 @@ impl HttpPool {
                                         println!("Done Send request for url {}", request.url);
 
                                         println!("Done request for url {}", request.url);
-                                        match request.result.send(request.url) {
+                                        match request.result.send(HttpPoolResult{}) {
                                                 Ok(_) => println!("Send back request results to caller"),
                                                 Err(_) => println!("Failed to send back the request to the caller, properly already run into a timeout")
                                             }
@@ -146,10 +157,28 @@ impl HttpPool {
         Ok(())
     }
 
-    pub async fn get(&self, url: String, timeout: u64) -> HttpPoolResponse {
-        let (os_sender, os_receiver) = tokio::sync::oneshot::channel::<String>();
+    pub async fn get(&self, url: String, timeout: u64) -> Result<HttpPoolResponse> {
+        // check the cache
+        let key = "someThing";
+        if let Some(value) = self.cache.info.read().await.get(key) {
+            println!("Found value in cache, return straight away");
+            println!("{:?}", value);
+        }
+        println!("No cache hit, load from backend");
+        self.cache.info.write().await.insert(
+            key.to_owned(),
+            CacheEntry {
+                present: true,
+                path: "".to_owned(),
+                created: chrono::Utc::now(),
+                ref_count: 0,
+            },
+        );
 
-        let request = HttpRequest {
+        let (os_sender, os_receiver) = oneshot::channel::<HttpPoolResult>();
+
+        let request = HttpPoolRequest {
+            path: "".to_owned(),
             result: os_sender,
             url: url.clone(),
         };
@@ -178,7 +207,7 @@ impl HttpPool {
                         //         println!("Request for url {req_url} failed with error {err}");
                         //     }
                         // }
-                        Ok(HttpResponse {
+                        Ok(HttpPoolResponse {
                             file: String::from("Test").to_owned(),
                             status: StatusCode::ACCEPTED,
                             url: String::from("Test").to_owned(),
@@ -186,7 +215,7 @@ impl HttpPool {
                     }
                     Err(err) => {
                         println!("Request for url {url} failed to receive message {err}");
-                        Ok(HttpResponse {
+                        Ok(HttpPoolResponse {
                             file: String::from("Test").to_owned(),
                             status: StatusCode::ACCEPTED,
                             url: String::from("Test").to_owned(),
@@ -196,7 +225,7 @@ impl HttpPool {
             }
             Err(err) => {
                 println!("Request for url {url} run into timeout");
-                Ok(HttpResponse {
+                Ok(HttpPoolResponse {
                     file: String::from("Test").to_owned(),
                     status: StatusCode::ACCEPTED,
                     url: String::from("Test").to_owned(),
@@ -212,5 +241,62 @@ impl HttpPool {
         drop(self.shutdown_tx);
         let _ = self.shutdown_rx.recv().await;
         return Ok(());
+    }
+}
+
+/*---------------------------------------------------------------------------*/
+/*
+ * Builder for HttpPool instance
+ */
+pub struct HttpPoolBuilder {
+    size: i32,
+    timeout: i32,
+    cache: LocalCache,
+}
+
+/*
+ * HttpPool builder implementation
+ */
+impl HttpPoolBuilder {
+    pub fn new() -> HttpPoolBuilder {
+        HttpPoolBuilder {
+            size: 10,
+            timeout: 60,
+            cache: LocalCache::new(),
+        }
+    }
+
+    pub fn size(mut self, size: i32) -> HttpPoolBuilder {
+        self.size = size;
+        self
+    }
+
+    pub fn timeout(mut self, timeout: i32) -> HttpPoolBuilder {
+        self.timeout = timeout;
+        self
+    }
+
+    pub fn cache(mut self, cache: LocalCache) -> HttpPoolBuilder {
+        self.cache = cache;
+        self
+    }
+
+    pub fn build(self) -> HttpPool {
+        let (task_tx, task_rx) = async_channel::bounded::<HttpPoolRequest>(self.size as usize);
+        let (command_tx, command_rx) = broadcast::channel::<HttpPoolCommand>(self.size as usize);
+        let (shutdown_tx, shutdown_rx) = mpsc::channel(1);
+
+        HttpPool {
+            size: self.size,
+            timeout: self.timeout,
+            cache: self.cache,
+
+            task_tx: task_tx,
+            task_rx: task_rx,
+            command_tx: command_tx,
+            _command_rx: command_rx,
+            shutdown_tx: shutdown_tx,
+            shutdown_rx: shutdown_rx,
+        }
     }
 }
