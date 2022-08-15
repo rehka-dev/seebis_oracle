@@ -1,11 +1,11 @@
 use crate::worker_pool::cache;
 use anyhow::Result;
 use async_channel;
-use reqwest::{self, StatusCode};
+use reqwest::{self};
 use std::error::Error;
 use std::fmt;
-use std::sync::Arc;
-use tokio::sync::{broadcast, mpsc, oneshot, Mutex, RwLock};
+use std::path::PathBuf;
+use tokio::sync::{broadcast, mpsc, oneshot};
 use tokio::time;
 
 /*
@@ -27,20 +27,16 @@ impl fmt::Display for HttpPoolResult {
  * load and store the payload properly
  */
 pub struct HttpPoolRequest {
-    url: String,                             // attachment url to download
-    path: String,                            // path to store payload in
-    result: oneshot::Sender<HttpPoolResult>, // channel to receive status
+    url: String,                               // attachment url to download
+    path: PathBuf,                             // path to store payload in
+    result: oneshot::Sender<HttpPoolResponse>, // channel to receive status
 }
 
-/*
- * HttpPoolResponse
- * Received by the client requesting work
-*/
-pub struct HttpPoolResponse {
-    url: String,
-    status: StatusCode,
-    file: String,
+pub enum HttpPoolResponse {
+    Success,
+    Failed,
 }
+
 /* HttpPoolCommand
 * Broadcasted to all workers to request some action
 */
@@ -77,42 +73,64 @@ impl HttpPool {
                 let _shutdown_sender = shutdown_tx;
                 loop {
                     tokio::select! {
-                        cmd = command_rx.recv() => {
-                            match cmd {
-                                _shutdown => {
-                                    println!("HttpPoolWorker[{i}]: Received shutdown signal");
-                                    break;
+                        cmd_msg = command_rx.recv() => {
+                            match cmd_msg {
+                                Ok(cmd) => {
+                                    match cmd {
+                                        HttpPoolCommand::Shutdown => {
+                                            println!("HttpPoolWorker[{i}]: Received shutdown signal");
+                                            break;
+                                        }
+                                        _ => {
+                                            println!("HttpWorker[{i}]: Received some unknown commmand");
+                                        }
+                                    }
+
+                                },
+                                Err(_) => println!("HttpWorker[{i}]: Failed to receive some cmd"),
                                 }
-                            }
-                        },
+                            },
                         task = task_rx.recv() => {
                             match task {
-                                Ok(request) => {
-                                    if request.result.is_closed() {
+                                Ok(req) => {
+                                    if req.result.is_closed() {
                                         println!(
                                             "HttpPoolWorker[{i}]: Received closed request for url: {}",
-                                            request.url
+                                            req.url
                                         );
                                     } else {
                                         println!(
                                             "HttpPoolWorker[{i}]: Received a new request for url: {}",
-                                            request.url
+                                            req.url
                                         );
-                                        println!("Send request for url {}", request.url);
+                                        println!("Send request for url {}", req.url);
                                         let client = reqwest::Client::new();
-                                        let res = client.get("https://google.com").send().await.unwrap();
-                                        let payload = res.bytes().await.unwrap();
-                                        // println!("{:?}", payload);
-                                        // let _ = reqwest::get("https://httpbin.org/ip").await;
-                                        println!("Done Send request for url {}", request.url);
+                                        let mut result = HttpPoolResponse::Success;
+                                        if let Err(_) = client.get(req.url).send().await {
+                                           result = HttpPoolResponse::Failed;
+                                        }
 
-                                        println!("Done request for url {}", request.url);
-                                        match request.result.send(HttpPoolResult{}) {
-                                                Ok(_) => println!("Send back request results to caller"),
-                                                Err(_) => println!("Failed to send back the request to the caller, properly already run into a timeout")
-                                            }
+                                        // let mut file = File::create(req.)
+
+                                        match req.result.send(result) {
+                                            Ok(_) => println!("Send back request results to caller"),
+                                            Err(_) => println!("Failed to send back the request to the caller, properly already run into a timeout")
+                                        }
+
+                                        }
+
+
+                                        // let payload = res.bytes().await.unwrap();
+                                        // // println!("{:?}", payload);
+                                        // // let _ = reqwest::get("https://httpbin.org/ip").await;
+                                        // println!("Done Send request for url {}", request.url);
+
+                                        // println!("Done request for url {}", request.url);
+                                        // match request.result.send(HttpPoolResponse{}) {
+                                        //         Ok(_) => println!("Send back request results to caller"),
+                                        //         Err(_) => println!("Failed to send back the request to the caller, properly already run into a timeout")
+                                        //     }
                                     }
-                            },
                             Err(err) => {
                                 println!("Received error {err} during channel reading a new task")
                             }
@@ -127,78 +145,47 @@ impl HttpPool {
         Ok(())
     }
 
-    pub async fn get(&self, url: String, timeout: u64) -> Result<HttpPoolResponse> {
-        // check cache
-        let key = "someKey".to_owned();
+    pub async fn get(
+        &self,
+        url: String,
+        key: &String,
+        timeout: u64,
+        off: usize,
+        next: usize,
+    ) -> Result<HttpPoolResponse> {
+        println!("Received http-pool request for key {key} and url {url}");
+
+        // TODO: use some tmpfs file in case no caching is enabled
+        let mut cache_file = String::from("");
         if let Some(cache) = &self.cache {
-            if cache.exists(&key, None).await {}
+            if cache.exists(key, Some(next + off)).await {
+                println!("Request can be served by the cache, let's return success");
+                return Ok(HttpPoolResponse::Success);
+            }
+            println!("Request cannot be served by the cache");
+            // add a new entry to the cache
+            cache_file = cache.add(key).await?;
         }
-        println!("Key not found, fetch from backend");
 
-        let (os_sender, os_receiver) = oneshot::channel::<HttpPoolResult>();
-
+        println!("Load data from backend via the http pool workers");
+        let (os_sender, os_receiver) = oneshot::channel::<HttpPoolResponse>();
         let request = HttpPoolRequest {
-            path: "".to_owned(),
+            path: PathBuf::from(cache_file),
             result: os_sender,
             url: url.clone(),
         };
 
-        self.task_tx
-            .send(request)
-            .await
-            .expect("Failed to publish message to task group");
-
-        // check if a timeout or value was returned
-        match time::timeout(time::Duration::from_millis(timeout), os_receiver).await {
-            Ok(res) => {
-                println!("Request for url {url} finished without reaching the timeout");
-                match res {
-                    Ok(res) => {
-                        println!("Request for url {url} receive message via result channel");
-                        // println!("{res}");
-                        // match res {
-                        //     Ok(res) => {
-                        //         println!(
-                        //             "Request for url {req_url} returned status code {}",
-                        //             res.status()
-                        //         );
-                        //     }
-                        //     Err(err) => {
-                        //         println!("Request for url {req_url} failed with error {err}");
-                        //     }
-                        // }
-                        Ok(HttpPoolResponse {
-                            file: String::from("Test").to_owned(),
-                            status: StatusCode::ACCEPTED,
-                            url: String::from("Test").to_owned(),
-                        })
-                    }
-                    Err(err) => {
-                        println!("Request for url {url} failed to receive message {err}");
-                        Ok(HttpPoolResponse {
-                            file: String::from("Test").to_owned(),
-                            status: StatusCode::ACCEPTED,
-                            url: String::from("Test").to_owned(),
-                        })
-                    }
-                }
-            }
-            Err(err) => {
-                println!("Request for url {url} run into timeout");
-                Ok(HttpPoolResponse {
-                    file: String::from("Test").to_owned(),
-                    status: StatusCode::ACCEPTED,
-                    url: String::from("Test").to_owned(),
-                })
-            }
-        }
+        self.task_tx.send(request).await?;
+        let channel_res = time::timeout(time::Duration::from_millis(timeout), os_receiver).await?;
+        let _http_res = channel_res?;
+        println!("Http Pool finished request {url} with some status");
+        Ok(HttpPoolResponse::Success)
     }
 
-    pub async fn shutdown(mut self) -> Result<(), Box<dyn Error>> {
-        if let Err(_) = self.command_tx.send(HttpPoolCommand::Shutdown) {
-            return Err("Failed".to_owned().into());
-        }
+    pub async fn shutdown(mut self) -> Result<()> {
+        self.command_tx.send(HttpPoolCommand::Shutdown);
         drop(self.shutdown_tx);
+
         let _ = self.shutdown_rx.recv().await;
         return Ok(());
     }

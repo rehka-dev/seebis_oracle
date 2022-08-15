@@ -1,22 +1,47 @@
 mod worker_pool;
 
-use std::sync::Arc;
+use std::{str::Bytes, sync::Arc};
 
 use actix_web::{get, http, web, App, HttpServer, Responder};
-use anyhow::Result;
 use worker_pool::http_pool::HttpPool;
+
+use tokio::io::{AsyncReadExt, AsyncSeekExt};
+use tokio::{fs::File, sync::RwLock};
 
 struct AppState {
     http_pool: Arc<HttpPool>,
 }
 
+const PAGE_SIZE: usize = 4096;
+
 #[get("/hello/{name}")]
-async fn greet<'a>(name: web::Path<String>, data: web::Data<AppState>) -> impl Responder {
-    let http_pool = &data.http_pool;
-    http_pool
-        .get("http://localhost:8080".to_owned(), 1000)
+async fn greet(name: web::Path<String>, data: web::Data<AppState>) -> impl Responder {
+    let offset: usize = 0; // received from the API call
+    let next: usize = 4096;
+    let timeout: u64 = 10000;
+
+    // request it
+    match &data
+        .http_pool
+        .get(
+            "https://google.com".to_owned(),
+            &String::from("google"),
+            timeout,
+            offset,
+            next,
+        )
         .await
-        .expect("msg");
+    {
+        Ok(_) => {
+            println!("Some response received")
+        }
+        Err(err) => println!("Err: {:?}", err),
+    }
+
+    // read data
+
+    // release data
+
     format!("Hello {name}!")
 }
 
@@ -39,7 +64,7 @@ async fn main() -> anyhow::Result<()> {
 
     let _ = HttpServer::new(move || App::new().app_data(app_data.clone()).service(greet))
         .bind(("127.0.0.1", 8080))
-        .expect("Failed to start webserver properly")
+        .expect("Failed to start WebServer properly")
         .run()
         .await;
 

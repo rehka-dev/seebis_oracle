@@ -1,7 +1,9 @@
+use anyhow::Result;
 use async_trait::async_trait;
 use chrono::Utc;
 use std::collections::HashMap;
-use tokio::io::{self, AsyncReadExt, AsyncSeekExt};
+use std::path::PathBuf;
+use tokio::io::{AsyncReadExt, AsyncSeekExt};
 use tokio::{fs::File, sync::RwLock};
 
 use super::http_pool::HttpPoolBuilder;
@@ -36,11 +38,11 @@ impl CacheEntry {
 #[async_trait]
 pub trait HttpPoolCache {
     async fn exists(&self, key: &String, size: Option<usize>) -> bool;
-    async fn add(&mut self, key: &String);
-    async fn set_present(&mut self, key: &String) -> bool;
-    async fn set_size(&mut self, key: &String, size: usize) -> bool;
-    async fn inc_ref_count(&mut self, key: &String) -> bool;
-    async fn dec_ref_count(&mut self, key: &String) -> bool;
+    async fn add(&self, key: &String) -> Result<String>;
+    async fn set_present(&self, key: &String) -> bool;
+    async fn set_size(&self, key: &String, size: usize) -> bool;
+    async fn inc_ref_count(&self, key: &String) -> bool;
+    async fn dec_ref_count(&self, key: &String) -> bool;
     async fn read_data(&self, key: &String, off: usize, buf: &mut [u8]) -> anyhow::Result<usize>;
     // TODO: add some streaming function, if we requested a bigger chunk at ones
 }
@@ -59,6 +61,20 @@ impl LocalCache {
         LocalCache {
             storage: path,
             info: RwLock::new(HashMap::<String, CacheEntry>::new()),
+        }
+    }
+
+    async fn build_cache_path(&self, key: &String) -> Result<String> {
+        let mut path = PathBuf::from(self.storage.clone());
+        path.push(key);
+        path.set_extension("txt");
+
+        if let Some(res) = path.to_str() {
+            Ok(res.to_owned())
+        } else {
+            Err(anyhow::Error::msg(
+                "Failed to create cache path out of the key",
+            ))
         }
     }
 }
@@ -93,22 +109,27 @@ impl HttpPoolCache for LocalCache {
             }
         }
 
-        println!("CacheEntry does not exists, let it create for the POC");
-        let mut ce = CacheEntry::new();
-        ce.present = true;
-
-        self.info.write().await.insert(key.to_owned(), ce);
         false
     }
 
-    async fn add(&mut self, key: &String) {
-        self.info
-            .write()
-            .await
-            .insert(key.clone(), CacheEntry::new());
+    async fn add(&self, key: &String) -> Result<String> {
+        let mut map = self.info.write().await;
+        if map.contains_key(key) {
+            Err(anyhow::Error::msg(format!(
+                "Duplicate key in cache found for {}",
+                key
+            )))
+        } else {
+            let mut entry = CacheEntry::new();
+            let path = self.build_cache_path(key).await?;
+            entry.path = path.clone();
+
+            map.insert(key.clone(), entry);
+            Ok(path)
+        }
     }
 
-    async fn set_present(&mut self, key: &String) -> bool {
+    async fn set_present(&self, key: &String) -> bool {
         if let Some(entry) = self.info.write().await.get_mut(key) {
             entry.present = true;
             true
@@ -117,7 +138,7 @@ impl HttpPoolCache for LocalCache {
         }
     }
 
-    async fn set_size(&mut self, key: &String, size: usize) -> bool {
+    async fn set_size(&self, key: &String, size: usize) -> bool {
         if let Some(entry) = self.info.write().await.get_mut(key) {
             entry.size = size;
             true
@@ -126,7 +147,7 @@ impl HttpPoolCache for LocalCache {
         }
     }
 
-    async fn inc_ref_count(&mut self, key: &String) -> bool {
+    async fn inc_ref_count(&self, key: &String) -> bool {
         if let Some(entry) = self.info.write().await.get_mut(key) {
             entry.ref_count = std::cmp::min(entry.ref_count + 1, std::u32::MAX);
             true
@@ -134,7 +155,7 @@ impl HttpPoolCache for LocalCache {
             false
         }
     }
-    async fn dec_ref_count(&mut self, key: &String) -> bool {
+    async fn dec_ref_count(&self, key: &String) -> bool {
         if let Some(entry) = self.info.write().await.get_mut(key) {
             entry.ref_count = std::cmp::max(entry.ref_count - 1, 0);
             true
@@ -146,7 +167,7 @@ impl HttpPoolCache for LocalCache {
     async fn read_data(&self, key: &String, off: usize, buf: &mut [u8]) -> anyhow::Result<usize> {
         if let Some(entry) = self.info.read().await.get(key) {
             let mut file = File::open(&entry.path).await?;
-            file.seek(io::SeekFrom::Start(off as u64)).await?;
+            // file.seek(io::SeekFrom::Start(off as u64)).await?;
             Ok(file.read(buf).await?)
         } else {
             Err(anyhow::Error::msg("Requested data from unknown cache key"))
