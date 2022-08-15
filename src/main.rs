@@ -1,18 +1,18 @@
 mod worker_pool;
 
-use std::{str::Bytes, sync::Arc};
+use std::{sync::Arc};
 
-use actix_web::{get, http, web, App, HttpServer, Responder};
+use actix_web::{get, web, App, HttpServer, Responder};
 use worker_pool::http_pool::HttpPool;
 
-use tokio::io::{AsyncReadExt, AsyncSeekExt};
-use tokio::{fs::File, sync::RwLock};
+// use tokio::io::{AsyncReadExt, AsyncSeekExt};
+// use tokio::{fs::File, sync::RwLock};
 
 struct AppState {
     http_pool: Arc<HttpPool>,
 }
 
-const PAGE_SIZE: usize = 4096;
+// const PAGE_SIZE: usize = 4096;
 
 #[get("/hello/{name}")]
 async fn greet(name: web::Path<String>, data: web::Data<AppState>) -> impl Responder {

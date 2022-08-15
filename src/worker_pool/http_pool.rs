@@ -1,13 +1,17 @@
 use crate::worker_pool::cache;
 use anyhow::Result;
 use async_channel;
+use futures_util::StreamExt;
 use reqwest::{self};
 use std::error::Error;
 use std::fmt;
 use std::path::PathBuf;
+use tokio::fs::File;
 use tokio::sync::{broadcast, mpsc, oneshot};
 use tokio::time;
 
+use tokio::io::AsyncWriteExt;
+// use tokio::{fs::File, sync::RwLock};
 /*
  * HttpPoolResult
  * Internal struct holding the information about the
@@ -89,6 +93,7 @@ impl HttpPool {
                                 },
                                 Err(_) => println!("HttpWorker[{i}]: Failed to receive some cmd"),
                                 }
+
                             },
                         task = task_rx.recv() => {
                             match task {
@@ -100,17 +105,32 @@ impl HttpPool {
                                         );
                                     } else {
                                         println!(
-                                            "HttpPoolWorker[{i}]: Received a new request for url: {}",
-                                            req.url
+                                            "HttpPoolWorker[{i}]: Received a new request for url: {} and cache file {:?}",
+                                            req.url, req.path
                                         );
-                                        println!("Send request for url {}", req.url);
-                                        let client = reqwest::Client::new();
                                         let mut result = HttpPoolResponse::Success;
-                                        if let Err(_) = client.get(req.url).send().await {
-                                           result = HttpPoolResponse::Failed;
-                                        }
 
-                                        // let mut file = File::create(req.)
+                                        let client = reqwest::Client::new();
+                                        if let Ok(res) = client.get(req.url).send().await {
+                                            if let Ok(mut file) = File::create(req.path).await {
+                                            let mut stream = res.bytes_stream();
+
+                                            while let Some(item) = stream.next().await {
+                                                println!("Store next chunk of data");
+                                                if let Ok(data) = item {
+                                                    if let Err(_) = file.write_all(&data).await {
+                                                        result = HttpPoolResponse::Failed;
+                                                        break;
+                                                    }
+                                                    }
+                                                }
+                                            } else {
+                                                result = HttpPoolResponse::Failed;
+                                            }
+
+                                        } else {
+                                            result = HttpPoolResponse::Failed;
+                                        }
 
                                         match req.result.send(result) {
                                             Ok(_) => println!("Send back request results to caller"),
@@ -118,18 +138,6 @@ impl HttpPool {
                                         }
 
                                         }
-
-
-                                        // let payload = res.bytes().await.unwrap();
-                                        // // println!("{:?}", payload);
-                                        // // let _ = reqwest::get("https://httpbin.org/ip").await;
-                                        // println!("Done Send request for url {}", request.url);
-
-                                        // println!("Done request for url {}", request.url);
-                                        // match request.result.send(HttpPoolResponse{}) {
-                                        //         Ok(_) => println!("Send back request results to caller"),
-                                        //         Err(_) => println!("Failed to send back the request to the caller, properly already run into a timeout")
-                                        //     }
                                     }
                             Err(err) => {
                                 println!("Received error {err} during channel reading a new task")

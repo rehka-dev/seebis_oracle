@@ -3,7 +3,7 @@ use async_trait::async_trait;
 use chrono::Utc;
 use std::collections::HashMap;
 use std::path::PathBuf;
-use tokio::io::{AsyncReadExt, AsyncSeekExt};
+use tokio::io::{AsyncReadExt};
 use tokio::{fs::File, sync::RwLock};
 
 use super::http_pool::HttpPoolBuilder;
@@ -11,11 +11,11 @@ use super::http_pool::HttpPoolBuilder;
 /*
  * CacheEntry struct holding information
  */
-#[derive(Debug)]
+// #[derive(Debug)]
 pub struct CacheEntry {
     present: bool,                  // present bit
     path: String,                   // path to local file
-    created: chrono::DateTime<Utc>, // created timestamp
+    _created: chrono::DateTime<Utc>, // created timestamp
     ref_count: u32,                 // usage counter
     size: usize,
 }
@@ -25,7 +25,7 @@ impl CacheEntry {
         CacheEntry {
             present: false,
             path: "".to_owned(),
-            created: chrono::Utc::now(),
+            _created: chrono::Utc::now(),
             ref_count: 0,
             size: 0,
         }
@@ -164,7 +164,7 @@ impl HttpPoolCache for LocalCache {
         }
     }
 
-    async fn read_data(&self, key: &String, off: usize, buf: &mut [u8]) -> anyhow::Result<usize> {
+    async fn read_data(&self, key: &String, _off: usize, buf: &mut [u8]) -> anyhow::Result<usize> {
         if let Some(entry) = self.info.read().await.get(key) {
             let mut file = File::open(&entry.path).await?;
             // file.seek(io::SeekFrom::Start(off as u64)).await?;
