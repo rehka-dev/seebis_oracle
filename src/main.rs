@@ -20,17 +20,12 @@ async fn greet<'a>(name: web::Path<String>, data: web::Data<AppState>) -> impl R
     format!("Hello {name}!")
 }
 
-#[get("/shutdown")]
-async fn shutdown<'a>(data: web::Data<AppState>) -> String {
-    format!("Shutdown should be done")
-}
-
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let http_pool = worker_pool::http_pool::HttpPool::builder()
         .size(20)
         .timeout(1200)
-        .use_local_cache()
+        .use_local_cache("/home/akarner/Desktop/edi_poc/".to_owned())
         .build();
     http_pool.start().expect("Failed to start http pool");
 
@@ -42,16 +37,11 @@ async fn main() -> anyhow::Result<()> {
         http_pool: http_pool_arc.clone(),
     });
 
-    let _ = HttpServer::new(move || {
-        App::new()
-            .app_data(app_data.clone())
-            .service(greet)
-            .service(shutdown)
-    })
-    .bind(("127.0.0.1", 8080))
-    .expect("Failed to start webserver properly")
-    .run()
-    .await;
+    let _ = HttpServer::new(move || App::new().app_data(app_data.clone()).service(greet))
+        .bind(("127.0.0.1", 8080))
+        .expect("Failed to start webserver properly")
+        .run()
+        .await;
 
     if let Ok(http_pool) = Arc::try_unwrap(http_pool_arc) {
         println!("Http poll unwrapped successfully");

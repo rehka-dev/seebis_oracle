@@ -102,7 +102,7 @@ impl HttpPool {
                                         let client = reqwest::Client::new();
                                         let res = client.get("https://google.com").send().await.unwrap();
                                         let payload = res.bytes().await.unwrap();
-                                        println!("{:?}", payload);
+                                        // println!("{:?}", payload);
                                         // let _ = reqwest::get("https://httpbin.org/ip").await;
                                         println!("Done Send request for url {}", request.url);
 
@@ -131,29 +131,9 @@ impl HttpPool {
         // check cache
         let key = "someKey".to_owned();
         if let Some(cache) = &self.cache {
-            if cache.entry_exists(&key, None).await {
-                let stream = cache.get_stream(&key).await;
-                println!("Found key in local cache, return immediately {:?}", stream);
-            }
+            if cache.exists(&key, None).await {}
         }
         println!("Key not found, fetch from backend");
-
-        // check the cache
-        // let key = "someThing";
-        // if let Some(value) = self.cache.info.read().await.get(key) {
-        //     println!("Found value in cache, return straight away");
-        //     println!("{:?}", value);
-        // }
-        // println!("No cache hit, load from backend");
-        // self.cache.info.write().await.insert(
-        //     key.to_owned(),
-        //     CacheEntry {
-        //         present: true,
-        //         path: "".to_owned(),
-        //         created: chrono::Utc::now(),
-        //         ref_count: 0,
-        //     },
-        // );
 
         let (os_sender, os_receiver) = oneshot::channel::<HttpPoolResult>();
 
@@ -175,7 +155,7 @@ impl HttpPool {
                 match res {
                     Ok(res) => {
                         println!("Request for url {url} receive message via result channel");
-                        println!("{res}");
+                        // println!("{res}");
                         // match res {
                         //     Ok(res) => {
                         //         println!(
