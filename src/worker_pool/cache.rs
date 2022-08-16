@@ -15,7 +15,7 @@ pub enum CacheUpdate {
 }
 
 pub struct HttpResponse {
-    status: i32,
+    pub status: u16,
 }
 
 /*
@@ -58,6 +58,7 @@ pub trait HttpPoolCache {
     async fn subscribe(&self, key: &String) -> Result<broadcast::Receiver<CacheUpdate>>;
     async fn add(&self, key: &String) -> Result<String>;
     async fn set_present(&self, key: &String) -> bool;
+    async fn set_response(&self, key: &String, res: HttpResponse) -> bool;
     async fn set_size(&self, key: &String, size: usize, done: bool) -> Result<bool>;
     async fn inc_ref_count(&self, key: &String) -> bool;
     async fn dec_ref_count(&self, key: &String) -> bool;
@@ -162,6 +163,15 @@ impl HttpPoolCache for LocalCache {
     async fn set_present(&self, key: &String) -> bool {
         if let Some(entry) = self.info.write().await.get_mut(key) {
             entry.present = true;
+            true
+        } else {
+            false
+        }
+    }
+
+    async fn set_response(&self, key: &String, res: HttpResponse) -> bool {
+        if let Some(entry) = self.info.write().await.get_mut(key) {
+            entry.response = Some(res);
             true
         } else {
             false

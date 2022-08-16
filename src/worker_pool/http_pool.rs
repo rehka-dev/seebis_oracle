@@ -6,6 +6,7 @@ use reqwest::{self};
 use std::error::Error;
 use std::fmt;
 use std::path::PathBuf;
+use std::sync::Arc;
 use tokio::fs::File;
 use tokio::sync::{broadcast, mpsc, oneshot};
 use tokio::time;
@@ -51,7 +52,7 @@ pub enum HttpPoolCommand {
 pub struct HttpPool {
     size: i32,
     timeout: i32,
-    cache: Box<dyn cache::HttpPoolCache + Sync + Send>,
+    cache: Arc<Box<dyn cache::HttpPoolCache + Sync + Send>>,
 
     // channels to distribute work and shutdown graceful
     task_tx: async_channel::Sender<HttpPoolRequest>,
@@ -72,17 +73,23 @@ impl HttpPool {
             let task_rx = self.task_rx.clone();
             let mut command_rx = self.command_tx.subscribe();
             let shutdown_tx = self.shutdown_tx.clone();
+            let cache = self.cache.clone();
 
             tokio::spawn(async move {
                 let _shutdown_sender = shutdown_tx;
+                let cache = cache;
                 loop {
                     tokio::select! {
                         task = task_rx.recv() => {
-                            let cache = &self.cache;
                             if let Ok(req) = task {
                                 println!("HttpPoolWorker[{i}]: Received a new request for url: {} and cache file {:?}", req.url, req.path);
                                 let client = reqwest::Client::new();
                                 if let Ok(res) = client.get(req.url).send().await {
+                                    if false == cache.set_response(&req.key, cache::HttpResponse{
+                                        status: res.status().as_u16()
+                                    }).await {
+                                        println!("Failed to set the response properly");
+                                    }
                                     // TODO: use abstraction via cache trait
                                     if let Ok(mut file) = File::create(req.path).await {
                                         let mut stream = res.bytes_stream();
@@ -95,14 +102,14 @@ impl HttpPool {
                                                     break;
                                                 }
                                                 size += data.len();
-                                                // if let Err(_) = self.cache.set_size(&req.key, size, false).await {
-                                                //     println!("Failed to update cache entry");
-                                                // }
+                                                if let Err(_) = cache.set_size(&req.key, size, false).await {
+                                                    println!("Failed to update cache entry");
+                                                }
                                             }
                                         }
-                                        // if let Err(_) = self.cache.set_size(&req.key, size, true).await {
-                                        //     println!("Failed to update cache entry");
-                                        // }
+                                        if let Err(_) = cache.set_size(&req.key, size, true).await {
+                                            println!("Failed to update cache entry");
+                                        }
                                     } else {
                                         println!("HttpPoolWorker[{i}]: Failed to open cache storage");
                                     }
@@ -170,11 +177,13 @@ impl HttpPool {
             match notify_rx.recv().await {
                 Ok(CacheUpdate::Update(size)) => {
                     // check if we have already received enough data
-                    if (off + next) >= size {
+                    println!("Received runing update: {size} and need {}", off + next);
+                    if size >= (off + next) {
                         break;
                     }
                 }
                 Ok(CacheUpdate::Finished) => {
+                    println!("Received finished update");
                     break;
                 }
                 Err(err) => {
@@ -242,7 +251,7 @@ impl HttpPoolBuilder {
         HttpPool {
             size: self.size,
             timeout: self.timeout,
-            cache: self.cache.unwrap(),
+            cache: Arc::new(self.cache.unwrap()),
 
             task_tx: task_tx,
             task_rx: task_rx,
