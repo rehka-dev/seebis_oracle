@@ -1,4 +1,4 @@
-use crate::worker_pool::cache::{self, CacheUpdate};
+use crate::worker_pool::cache::{self, CacheResult, CacheUpdate};
 use anyhow::Result;
 use async_channel;
 use futures_util::StreamExt;
@@ -162,15 +162,22 @@ impl HttpPool {
 
         // TODO: use some tmpfs file in case no caching is enabled
         let mut cache_file = String::from("");
-        if self.cache.exists(key, Some(next + off)).await {
-            println!("Request can be served by the cache, let's return success");
-            let res = self.cache.read_response(key).await?;
-            return Ok(HttpPoolResponse::CacheHit(res));
+        match self.cache.exists(key, Some(next + off)).await {
+            CacheResult::Present => {
+                println!("Request can be served by the cache, let's return success");
+                let res = self.cache.read_response(key).await?;
+                return Ok(HttpPoolResponse::CacheHit(res));
+            }
+            CacheResult::NotFound => {
+                println!("Request cannot be served by the cache");
+                // add a new entry to the cache and subscribe to it notify channel
+                cache_file = self.cache.add(key).await?;
+            }
+            CacheResult::Running => {
+                println!("Request currently running");
+            }
         }
 
-        println!("Request cannot be served by the cache");
-        // add a new entry to the cache and subscribe to it notify channel
-        cache_file = self.cache.add(key).await?;
         let mut notify_rx = self.cache.subscribe(key).await?;
 
         println!("Load data from backend via the http pool workers");
@@ -197,7 +204,7 @@ impl HttpPool {
                     break;
                 }
                 Err(err) => {
-                    // TODO: check if we are now done
+                    // TODO: check if we are now done and therefore the channel is closed
                     return Err(anyhow::Error::from(err));
                 }
             }

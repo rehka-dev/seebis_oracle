@@ -54,7 +54,7 @@ impl CacheEntry {
  */
 #[async_trait]
 pub trait HttpPoolCache {
-    async fn exists(&self, key: &String, size: Option<usize>) -> bool;
+    async fn exists(&self, key: &String, size: Option<usize>) -> CacheResult;
     async fn subscribe(&self, key: &String) -> Result<broadcast::Receiver<CacheUpdate>>;
     async fn add(&self, key: &String) -> Result<String>;
     async fn set_present(&self, key: &String) -> bool;
@@ -63,7 +63,8 @@ pub trait HttpPoolCache {
     async fn inc_ref_count(&self, key: &String) -> bool;
     async fn dec_ref_count(&self, key: &String) -> bool;
     async fn read_response(&self, key: &String) -> Result<HttpResponse>;
-    async fn read_data(&self, key: &String, off: usize, buf: &mut Vec<u8>) -> anyhow::Result<usize>;
+    async fn read_data(&self, key: &String, off: usize, buf: &mut Vec<u8>)
+        -> anyhow::Result<usize>;
     // TODO: add some streaming function, if we requested a bigger chunk at ones
 }
 
@@ -114,22 +115,33 @@ impl HttpPoolBuilder {
  * signalling that the entire payload is stored on disk,
  * or if we have already enough data available by setting the asize parameter
  */
+
+pub enum CacheResult {
+    Present,
+    Running,
+    NotFound,
+}
+
 #[async_trait]
 impl HttpPoolCache for LocalCache {
-    async fn exists(&self, key: &String, asize: Option<usize>) -> bool {
+    async fn exists(&self, key: &String, asize: Option<usize>) -> CacheResult {
         if let Some(entry) = self.info.read().await.get(key) {
             if entry.present {
-                return true;
+                return CacheResult::Present;
             } else {
                 if let Some(size) = asize {
-                    return entry.size >= size;
+                    if entry.size >= size {
+                        return CacheResult::Present;
+                    } else {
+                        return CacheResult::Running;
+                    }
                 } else {
-                    return false;
+                    return CacheResult::Running;
                 }
             }
         }
 
-        false
+        return CacheResult::NotFound;
     }
 
     async fn subscribe(&self, key: &String) -> Result<broadcast::Receiver<CacheUpdate>> {
@@ -185,7 +197,7 @@ impl HttpPoolCache for LocalCache {
                 if let Err(err) = entry.notify_tx.send(CacheUpdate::Finished) {
                     Err(anyhow::Error::from(err))
                 } else {
-                    Ok(true)
+                    Ok(self.set_present(key).await)
                 }
             } else {
                 if let Err(err) = entry.notify_tx.send(CacheUpdate::Update(size)) {
@@ -230,7 +242,12 @@ impl HttpPoolCache for LocalCache {
         }
     }
 
-    async fn read_data(&self, key: &String, off: usize, buf: &mut Vec<u8>) -> anyhow::Result<usize> {
+    async fn read_data(
+        &self,
+        key: &String,
+        off: usize,
+        buf: &mut Vec<u8>,
+    ) -> anyhow::Result<usize> {
         if let Some(entry) = self.info.read().await.get(key) {
             println!("Try to open file");
             let mut file = File::open(&entry.path).await?;
