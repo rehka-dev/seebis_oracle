@@ -1,11 +1,16 @@
 mod worker_pool;
 
-use std::{sync::Arc};
+use std::sync::Arc;
 
-use actix_web::{get, web, App, HttpServer, Responder};
+use actix_web::{
+    get,
+    web::{self, BytesMut},
+    App, HttpServer, Responder,
+};
+use tokio::fs::File;
 use worker_pool::http_pool::HttpPool;
 
-// use tokio::io::{AsyncReadExt, AsyncSeekExt};
+use tokio::io::{AsyncReadExt, AsyncSeekExt};
 // use tokio::{fs::File, sync::RwLock};
 
 struct AppState {
@@ -17,7 +22,7 @@ struct AppState {
 #[get("/hello/{name}")]
 async fn greet(name: web::Path<String>, data: web::Data<AppState>) -> impl Responder {
     let offset: usize = 0; // received from the API call
-    let next: usize = 4096;
+    let next = String::from(name.as_str()).parse::<usize>().unwrap();
     let timeout: u64 = 10000;
 
     // request it
@@ -39,10 +44,20 @@ async fn greet(name: web::Path<String>, data: web::Data<AppState>) -> impl Respo
     }
 
     // read data
+    let mut buffer = Vec::<u8>::with_capacity(next);
+    match &data
+        .http_pool
+        .cache
+        .read_data(&String::from("google"), 0, &mut buffer)
+        .await
+    {
+        Ok(size) => println!("Read {size} byets"),
+        Err(err) => println!("HTTP Handler failed to read the data {}", err),
+    }
 
     // release data
 
-    format!("Hello {name}!")
+    format!("Payload {:?}!", String::from_utf8_lossy(&buffer))
 }
 
 #[tokio::main]

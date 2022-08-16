@@ -52,7 +52,7 @@ pub enum HttpPoolCommand {
 pub struct HttpPool {
     size: i32,
     timeout: i32,
-    cache: Arc<Box<dyn cache::HttpPoolCache + Sync + Send>>,
+    pub cache: Arc<Box<dyn cache::HttpPoolCache + Sync + Send>>,
 
     // channels to distribute work and shutdown graceful
     task_tx: async_channel::Sender<HttpPoolRequest>,
@@ -101,6 +101,16 @@ impl HttpPool {
                                                     println!("Failed to write next chunk of data");
                                                     break;
                                                 }
+                                                if let Err(_) = file.flush().await {
+                                                    println!("Failed to flush next chunk of data");
+                                                    break;
+                                                }
+                                                if let Err(_) = file.sync_data().await {
+                                                    println!("Failed to sync chunk data");
+                                                    break;
+                                                }
+                                                use tokio::time::{sleep, Duration};
+                                                sleep(Duration::from_millis(500)).await;
                                                 size += data.len();
                                                 if let Err(_) = cache.set_size(&req.key, size, false).await {
                                                     println!("Failed to update cache entry");

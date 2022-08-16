@@ -3,7 +3,7 @@ use async_trait::async_trait;
 use chrono::Utc;
 use std::collections::HashMap;
 use std::path::PathBuf;
-use tokio::io::AsyncReadExt;
+use tokio::io::{AsyncReadExt, AsyncSeekExt};
 use tokio::{fs::File, sync::broadcast, sync::RwLock};
 
 use super::http_pool::HttpPoolBuilder;
@@ -63,7 +63,7 @@ pub trait HttpPoolCache {
     async fn inc_ref_count(&self, key: &String) -> bool;
     async fn dec_ref_count(&self, key: &String) -> bool;
     async fn read_response(&self, key: &String) -> Result<HttpResponse>;
-    async fn read_data(&self, key: &String, off: usize, buf: &mut [u8]) -> anyhow::Result<usize>;
+    async fn read_data(&self, key: &String, off: usize, buf: &mut Vec<u8>) -> anyhow::Result<usize>;
     // TODO: add some streaming function, if we requested a bigger chunk at ones
 }
 
@@ -230,11 +230,13 @@ impl HttpPoolCache for LocalCache {
         }
     }
 
-    async fn read_data(&self, key: &String, _off: usize, buf: &mut [u8]) -> anyhow::Result<usize> {
+    async fn read_data(&self, key: &String, off: usize, buf: &mut Vec<u8>) -> anyhow::Result<usize> {
         if let Some(entry) = self.info.read().await.get(key) {
+            println!("Try to open file");
             let mut file = File::open(&entry.path).await?;
-            // file.seek(io::SeekFrom::Start(off as u64)).await?;
-            Ok(file.read(buf).await?)
+            println!("Opened file {}", entry.path);
+            file.seek(std::io::SeekFrom::Start(off as u64)).await?;
+            Ok(file.read_buf(buf).await?)
         } else {
             Err(anyhow::Error::msg("Requested data from unknown cache key"))
         }
