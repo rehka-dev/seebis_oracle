@@ -1,4 +1,4 @@
-use crate::worker_pool::cache;
+use crate::worker_pool::cache::{self, CacheUpdate};
 use anyhow::Result;
 use async_channel;
 use futures_util::StreamExt;
@@ -11,7 +11,7 @@ use tokio::sync::{broadcast, mpsc, oneshot};
 use tokio::time;
 
 use tokio::io::AsyncWriteExt;
-// use tokio::{fs::File, sync::RwLock};
+
 /*
  * HttpPoolResult
  * Internal struct holding the information about the
@@ -31,14 +31,14 @@ impl fmt::Display for HttpPoolResult {
  * load and store the payload properly
  */
 pub struct HttpPoolRequest {
-    url: String,                               // attachment url to download
-    path: PathBuf,                             // path to store payload in
-    result: oneshot::Sender<HttpPoolResponse>, // channel to receive status
+    key: String,
+    url: String,   // attachment url to download
+    path: PathBuf, // path to store payload in
 }
 
 pub enum HttpPoolResponse {
-    Success,
-    Failed,
+    CacheHit(cache::HttpResponse),
+    CacheMiss(cache::HttpResponse),
 }
 
 /* HttpPoolCommand
@@ -51,7 +51,7 @@ pub enum HttpPoolCommand {
 pub struct HttpPool {
     size: i32,
     timeout: i32,
-    cache: Option<Box<dyn cache::HttpPoolCache + Sync + Send>>,
+    cache: Box<dyn cache::HttpPoolCache + Sync + Send>,
 
     // channels to distribute work and shutdown graceful
     task_tx: async_channel::Sender<HttpPoolRequest>,
@@ -77,73 +77,53 @@ impl HttpPool {
                 let _shutdown_sender = shutdown_tx;
                 loop {
                     tokio::select! {
-                        cmd_msg = command_rx.recv() => {
-                            match cmd_msg {
-                                Ok(cmd) => {
-                                    match cmd {
-                                        HttpPoolCommand::Shutdown => {
-                                            println!("HttpPoolWorker[{i}]: Received shutdown signal");
-                                            break;
-                                        }
-                                        _ => {
-                                            println!("HttpWorker[{i}]: Received some unknown commmand");
-                                        }
-                                    }
-
-                                },
-                                Err(_) => println!("HttpWorker[{i}]: Failed to receive some cmd"),
-                                }
-
-                            },
                         task = task_rx.recv() => {
-                            match task {
-                                Ok(req) => {
-                                    if req.result.is_closed() {
-                                        println!(
-                                            "HttpPoolWorker[{i}]: Received closed request for url: {}",
-                                            req.url
-                                        );
-                                    } else {
-                                        println!(
-                                            "HttpPoolWorker[{i}]: Received a new request for url: {} and cache file {:?}",
-                                            req.url, req.path
-                                        );
-                                        let mut result = HttpPoolResponse::Success;
-
-                                        let client = reqwest::Client::new();
-                                        if let Ok(res) = client.get(req.url).send().await {
-                                            if let Ok(mut file) = File::create(req.path).await {
-                                            let mut stream = res.bytes_stream();
-
-                                            while let Some(item) = stream.next().await {
-                                                println!("Store next chunk of data");
-                                                if let Ok(data) = item {
-                                                    if let Err(_) = file.write_all(&data).await {
-                                                        result = HttpPoolResponse::Failed;
-                                                        break;
-                                                    }
-                                                    }
+                            let cache = &self.cache;
+                            if let Ok(req) = task {
+                                println!("HttpPoolWorker[{i}]: Received a new request for url: {} and cache file {:?}", req.url, req.path);
+                                let client = reqwest::Client::new();
+                                if let Ok(res) = client.get(req.url).send().await {
+                                    // TODO: use abstraction via cache trait
+                                    if let Ok(mut file) = File::create(req.path).await {
+                                        let mut stream = res.bytes_stream();
+                                        let mut size :usize = 0;
+                                        while let Some(item) = stream.next().await {
+                                            println!("Store next chunk of data");
+                                            if let Ok(data) = item {
+                                                if let Err(_) = file.write_all(&data).await {
+                                                    println!("Failed to write next chunk of data");
+                                                    break;
                                                 }
-                                            } else {
-                                                result = HttpPoolResponse::Failed;
+                                                size += data.len();
+                                                // if let Err(_) = self.cache.set_size(&req.key, size, false).await {
+                                                //     println!("Failed to update cache entry");
+                                                // }
                                             }
-
-                                        } else {
-                                            result = HttpPoolResponse::Failed;
                                         }
-
-                                        match req.result.send(result) {
-                                            Ok(_) => println!("Send back request results to caller"),
-                                            Err(_) => println!("Failed to send back the request to the caller, properly already run into a timeout")
-                                        }
-
-                                        }
+                                        // if let Err(_) = self.cache.set_size(&req.key, size, true).await {
+                                        //     println!("Failed to update cache entry");
+                                        // }
+                                    } else {
+                                        println!("HttpPoolWorker[{i}]: Failed to open cache storage");
                                     }
-                            Err(err) => {
-                                println!("Received error {err} during channel reading a new task")
+                                } else {
+                                    println!("HttpPoolWorker[{i}]: Request failed to execute");
+                                }
+                            } else {
+                                // TODO: should we shutdown?
+                                println!("HttpPoolWorker[{i}]: Failed to receive new task via channel");
                             }
                         }
-                        }
+                        cmd = command_rx.recv() => {
+                            match cmd {
+                                Ok(HttpPoolCommand::Shutdown) => {
+                                    println!("HttpPoolWorker[{i}]: Received shutdown signal");
+                                    break;
+                                },
+                                // Ok(_) =>  println!("HttpWorker[{i}]: Received some unknown commmand"),
+                                Err(_)=> println!("HttpWorker[{i}]: Failed to receive some cmd"),
+                            }
+                            },
                     }
                 }
                 println!("HttpPoolWorker[{i}]: Shutdown gracefully");
@@ -165,29 +145,47 @@ impl HttpPool {
 
         // TODO: use some tmpfs file in case no caching is enabled
         let mut cache_file = String::from("");
-        if let Some(cache) = &self.cache {
-            if cache.exists(key, Some(next + off)).await {
-                println!("Request can be served by the cache, let's return success");
-                return Ok(HttpPoolResponse::Success);
-            }
-            println!("Request cannot be served by the cache");
-            // add a new entry to the cache
-            cache_file = cache.add(key).await?;
+        if self.cache.exists(key, Some(next + off)).await {
+            println!("Request can be served by the cache, let's return success");
+            let res = self.cache.read_response(key).await?;
+            return Ok(HttpPoolResponse::CacheHit(res));
         }
 
-        println!("Load data from backend via the http pool workers");
-        let (os_sender, os_receiver) = oneshot::channel::<HttpPoolResponse>();
-        let request = HttpPoolRequest {
-            path: PathBuf::from(cache_file),
-            result: os_sender,
-            url: url.clone(),
-        };
+        println!("Request cannot be served by the cache");
+        // add a new entry to the cache and subscribe to it notify channel
+        cache_file = self.cache.add(key).await?;
+        let mut notify_rx = self.cache.subscribe(key).await?;
 
-        self.task_tx.send(request).await?;
-        let channel_res = time::timeout(time::Duration::from_millis(timeout), os_receiver).await?;
-        let _http_res = channel_res?;
+        println!("Load data from backend via the http pool workers");
+        self.task_tx
+            .send(HttpPoolRequest {
+                key: key.clone(),
+                path: PathBuf::from(cache_file),
+                url: url.clone(),
+            })
+            .await?;
+
+        loop {
+            println!("Start to wait for the worker to finish loading the needed data");
+            match notify_rx.recv().await {
+                Ok(CacheUpdate::Update(size)) => {
+                    // check if we have already received enough data
+                    if (off + next) >= size {
+                        break;
+                    }
+                }
+                Ok(CacheUpdate::Finished) => {
+                    break;
+                }
+                Err(err) => {
+                    // TODO: check if we are now done
+                    return Err(anyhow::Error::from(err));
+                }
+            }
+        }
         println!("Http Pool finished request {url} with some status");
-        Ok(HttpPoolResponse::Success)
+        let res = self.cache.read_response(key).await?;
+        return Ok(HttpPoolResponse::CacheMiss(res));
     }
 
     pub async fn shutdown(mut self) -> Result<()> {
@@ -244,7 +242,7 @@ impl HttpPoolBuilder {
         HttpPool {
             size: self.size,
             timeout: self.timeout,
-            cache: self.cache,
+            cache: self.cache.unwrap(),
 
             task_tx: task_tx,
             task_rx: task_rx,

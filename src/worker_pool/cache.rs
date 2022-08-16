@@ -3,31 +3,48 @@ use async_trait::async_trait;
 use chrono::Utc;
 use std::collections::HashMap;
 use std::path::PathBuf;
-use tokio::io::{AsyncReadExt};
-use tokio::{fs::File, sync::RwLock};
+use tokio::io::AsyncReadExt;
+use tokio::{fs::File, sync::broadcast, sync::RwLock};
 
 use super::http_pool::HttpPoolBuilder;
+
+#[derive(Clone, Debug)]
+pub enum CacheUpdate {
+    Update(usize),
+    Finished,
+}
+
+pub struct HttpResponse {
+    status: i32,
+}
 
 /*
  * CacheEntry struct holding information
  */
 // #[derive(Debug)]
 pub struct CacheEntry {
-    present: bool,                  // present bit
-    path: String,                   // path to local file
+    present: bool,                   // present bit
+    path: String,                    // path to local file
     _created: chrono::DateTime<Utc>, // created timestamp
-    ref_count: u32,                 // usage counter
+    ref_count: u32,                  // usage counter
     size: usize,
+    response: Option<HttpResponse>,
+    notify_tx: broadcast::Sender<CacheUpdate>,
+    notify_rx: broadcast::Receiver<CacheUpdate>,
 }
 
 impl CacheEntry {
     fn new() -> Self {
+        let (tx, rx) = broadcast::channel::<CacheUpdate>(10);
         CacheEntry {
             present: false,
             path: "".to_owned(),
             _created: chrono::Utc::now(),
             ref_count: 0,
             size: 0,
+            response: None,
+            notify_tx: tx,
+            notify_rx: rx,
         }
     }
 }
@@ -38,11 +55,13 @@ impl CacheEntry {
 #[async_trait]
 pub trait HttpPoolCache {
     async fn exists(&self, key: &String, size: Option<usize>) -> bool;
+    async fn subscribe(&self, key: &String) -> Result<broadcast::Receiver<CacheUpdate>>;
     async fn add(&self, key: &String) -> Result<String>;
     async fn set_present(&self, key: &String) -> bool;
-    async fn set_size(&self, key: &String, size: usize) -> bool;
+    async fn set_size(&self, key: &String, size: usize, done: bool) -> Result<bool>;
     async fn inc_ref_count(&self, key: &String) -> bool;
     async fn dec_ref_count(&self, key: &String) -> bool;
+    async fn read_response(&self, key: &String) -> Result<HttpResponse>;
     async fn read_data(&self, key: &String, off: usize, buf: &mut [u8]) -> anyhow::Result<usize>;
     // TODO: add some streaming function, if we requested a bigger chunk at ones
 }
@@ -112,6 +131,17 @@ impl HttpPoolCache for LocalCache {
         false
     }
 
+    async fn subscribe(&self, key: &String) -> Result<broadcast::Receiver<CacheUpdate>> {
+        let map = self.info.read().await;
+        if let Some(entry) = map.get(key) {
+            Ok(entry.notify_tx.subscribe())
+        } else {
+            Err(anyhow::Error::msg(
+                "Requested to subscribe from unknown key",
+            ))
+        }
+    }
+
     async fn add(&self, key: &String) -> Result<String> {
         let mut map = self.info.write().await;
         if map.contains_key(key) {
@@ -138,12 +168,24 @@ impl HttpPoolCache for LocalCache {
         }
     }
 
-    async fn set_size(&self, key: &String, size: usize) -> bool {
+    async fn set_size(&self, key: &String, size: usize, done: bool) -> Result<bool> {
         if let Some(entry) = self.info.write().await.get_mut(key) {
             entry.size = size;
-            true
+            if done {
+                if let Err(err) = entry.notify_tx.send(CacheUpdate::Finished) {
+                    Err(anyhow::Error::from(err))
+                } else {
+                    Ok(true)
+                }
+            } else {
+                if let Err(err) = entry.notify_tx.send(CacheUpdate::Update(size)) {
+                    Err(anyhow::Error::from(err))
+                } else {
+                    Ok(true)
+                }
+            }
         } else {
-            false
+            Err(anyhow::Error::msg("Requested data from unknown cache key"))
         }
     }
 
@@ -161,6 +203,20 @@ impl HttpPoolCache for LocalCache {
             true
         } else {
             false
+        }
+    }
+
+    async fn read_response(&self, key: &String) -> Result<HttpResponse> {
+        if let Some(entry) = self.info.read().await.get(key) {
+            if let Some(res) = &entry.response {
+                Ok(HttpResponse { status: res.status })
+            } else {
+                Err(anyhow::Error::msg(
+                    "Request response for a key which was not executed yet",
+                ))
+            }
+        } else {
+            Err(anyhow::Error::msg("Requested data from unknown cache key"))
         }
     }
 
