@@ -125,6 +125,7 @@ pub enum CacheResult {
 #[async_trait]
 impl HttpPoolCache for LocalCache {
     async fn exists(&self, key: &String, asize: Option<usize>) -> CacheResult {
+        println!("Check if key {key} already exists");
         if let Some(entry) = self.info.read().await.get(key) {
             if entry.present {
                 return CacheResult::Present;
@@ -197,7 +198,8 @@ impl HttpPoolCache for LocalCache {
                 if let Err(err) = entry.notify_tx.send(CacheUpdate::Finished) {
                     Err(anyhow::Error::from(err))
                 } else {
-                    Ok(self.set_present(key).await)
+                    entry.present = true;
+                    Ok(true)
                 }
             } else {
                 if let Err(err) = entry.notify_tx.send(CacheUpdate::Update(size)) {

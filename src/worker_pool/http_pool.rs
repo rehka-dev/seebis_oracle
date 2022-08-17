@@ -91,37 +91,35 @@ impl HttpPool {
                                         println!("Failed to set the response properly");
                                     }
                                     // TODO: use abstraction via cache trait
-                                    if let Ok(mut file) = File::create(req.path).await {
-                                        let mut stream = res.bytes_stream();
-                                        let mut size :usize = 0;
-                                        while let Some(item) = stream.next().await {
-                                            println!("Store next chunk of data");
-                                            if let Ok(data) = item {
-                                                if let Err(_) = file.write_all(&data).await {
-                                                    println!("Failed to write next chunk of data");
-                                                    break;
-                                                }
-                                                if let Err(_) = file.flush().await {
-                                                    println!("Failed to flush next chunk of data");
-                                                    break;
-                                                }
-                                                if let Err(_) = file.sync_data().await {
-                                                    println!("Failed to sync chunk data");
-                                                    break;
-                                                }
-                                                use tokio::time::{sleep, Duration};
-                                                sleep(Duration::from_millis(500)).await;
-                                                size += data.len();
-                                                if let Err(_) = cache.set_size(&req.key, size, false).await {
-                                                    println!("Failed to update cache entry");
+                                    match File::create(req.path).await {
+                                        Ok(mut file) => {
+                                            let mut stream = res.bytes_stream();
+                                            let mut size :usize = 0;
+                                            while let Some(item) = stream.next().await {
+                                                println!("Store next chunk of data");
+                                                if let Ok(data) = item {
+                                                    if let Err(_) = file.write_all(&data).await {
+                                                        println!("Failed to write next chunk of data");
+                                                        break;
+                                                    }
+                                                    if let Err(_) = file.flush().await {
+                                                        println!("Failed to flush next chunk of data");
+                                                        break;
+                                                    }
+                                                    if let Err(_) = file.sync_data().await {
+                                                        println!("Failed to sync chunk data");
+                                                        break;
+                                                    }
+                                                    //use tokio::time::{sleep, Duration};
+                                                    //sleep(Duration::from_millis(500)).await;
+                                                    size += data.len();
+                                                    if let Err(_) = cache.set_size(&req.key, size, false).await {
+                                                        println!("Failed to update cache entry");
+                                                    }
                                                 }
                                             }
-                                        }
-                                        if let Err(_) = cache.set_size(&req.key, size, true).await {
-                                            println!("Failed to update cache entry");
-                                        }
-                                    } else {
-                                        println!("HttpPoolWorker[{i}]: Failed to open cache storage");
+                                        },
+                                        Err(err) => println!("Failed to update cache entry {}", err),
                                     }
                                 } else {
                                     println!("HttpPoolWorker[{i}]: Request failed to execute");
